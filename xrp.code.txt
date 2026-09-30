@@ -1,0 +1,827 @@
+from machine import Pin, ADC
+from XRPLib.defaults import *
+from GFULib.defaults import *
+from GFULib.morse import *
+import time
+import _thread 
+
+# --- PERFORMANCE TUNING ---
+right_motor_handicap = 0.890
+nominal_effort = 0.65  
+STOP_DIST = 14.0
+LIGHT_STOP_DIST = 4.0
+
+WAIT_FOR_GREEN = "WAIT_FOR_GREEN"
+TURN_180 = "TURN_180"
+DRIVE_FORWARD = "DRIVE_FORWARD"
+TURN_90 = "TURN_90"
+DRIVE_FORWARD2 = "DRIVE_FORWARD2"
+FORWARD_GAP_PUSH = "FORWARD_GAP_PUSH"
+TURN_INTO_ROOM2 = "TURN_INTO_ROOM2"
+FORWARD_CENTER_ROOM = "FORWARD_CENTER_ROOM"
+TURN_90_3 = "TURN_90_3"
+MOVE_TOWARD_LIGHT = "MOVE_TOWARD_LIGHT"
+READ_COLOR = "READ_COLOR"
+BACKUP_BEFORE_180 = "BACKUP_BEFORE_180"
+TURN_FOR_OTHER_SIDE = "TURN_FOR_OTHER_SIDE"
+TURN_90_TO_EXIT = "TURN_90_TO_EXIT"
+
+DRIVE_TO_R3_WALL = "DRIVE_TO_R3_WALL"
+TURN_CORNER_R2 = "TURN_CORNER_R2"
+FIND_R3_GAP = "FIND_R3_GAP"
+PUSH_R3_GAP = "PUSH_R3_GAP"
+TURN_INTO_ROOM3 = "TURN_INTO_ROOM3"
+
+# --- SQUARING ROOM 3 STATES ---
+CLEAR_R3_DOORWAY = "CLEAR_R3_DOORWAY"
+TURN_RIGHT_TO_PREP = "TURN_RIGHT_TO_PREP"
+DRIVE_DEEP_RIGHT = "DRIVE_DEEP_RIGHT"
+TURN_180_TO_SQUARE = "TURN_180_TO_SQUARE"
+SQUARE_UP_WALL = "SQUARE_UP_WALL"
+
+DRIVE_TO_POS_1 = "DRIVE_TO_POS_1"
+FACE_LIGHT_1 = "FACE_LIGHT_1"
+APPROACH_LIGHT_1 = "APPROACH_LIGHT_1"
+BACKUP_LIGHT_1 = "BACKUP_LIGHT_1"
+
+TURN_TO_POS_2 = "TURN_TO_POS_2"
+DRIVE_TO_POS_2 = "DRIVE_TO_POS_2"
+FACE_LIGHT_2 = "FACE_LIGHT_2"
+APPROACH_LIGHT_2 = "APPROACH_LIGHT_2"
+BACKUP_LIGHT_2 = "BACKUP_LIGHT_2"
+
+TURN_TO_POS_3 = "TURN_TO_POS_3"
+DRIVE_TO_POS_3 = "DRIVE_TO_POS_3"
+FACE_LIGHT_3 = "FACE_LIGHT_3"
+APPROACH_LIGHT_3 = "APPROACH_LIGHT_3"
+
+BUMP_R3_LIGHT = "BUMP_R3_LIGHT"
+WAIT_FOR_WHITE = "WAIT_FOR_WHITE"
+BACKUP_RETRY_LIGHT = "BACKUP_RETRY_LIGHT"
+REVERSE_OUT_R3 = "REVERSE_OUT_R3"
+
+# --- DYNAMIC R3 EXIT STATES ---
+TURN_180_RET = "TURN_180_RET"
+DRIVE_OUT_R3 = "DRIVE_OUT_R3"
+SQUARE_UP_SOUTH_WALL_R3 = "SQUARE_UP_SOUTH_WALL_R3" 
+TURN_TO_R3_GAP = "TURN_TO_R3_GAP"
+DRIVE_TO_R3_GAP_EDGE = "DRIVE_TO_R3_GAP_EDGE"
+PUSH_R3_GAP_OUT = "PUSH_R3_GAP_OUT"
+TURN_INTO_R2_FROM_R3 = "TURN_INTO_R2_FROM_R3"
+
+# --- NEW ROOM 2 RETURN STATES ---
+FORWARD_CENTER_R2_RET = "FORWARD_CENTER_R2_RET"
+TURN_AWAY_FROM_R2_LIGHT = "TURN_AWAY_FROM_R2_LIGHT"
+DRIVE_FAR_SIDE_R2_RET = "DRIVE_FAR_SIDE_R2_RET"
+TURN_SOUTH_R2_RET = "TURN_SOUTH_R2_RET"
+DRIVE_TO_R1_DIVIDER_RET = "DRIVE_TO_R1_DIVIDER_RET"
+TURN_ALONG_R1_DIVIDER_RET = "TURN_ALONG_R1_DIVIDER_RET"
+
+# --- UNIFIED ROOM 1 RETURN STATES ---
+FIND_R1_GAP_RET = "FIND_R1_GAP_RET"
+PUSH_R1_GAP_RET = "PUSH_R1_GAP_RET"
+FIND_R1_GAP_LEFT_RET = "FIND_R1_GAP_LEFT_RET"
+PUSH_R1_GAP_LEFT_RET = "PUSH_R1_GAP_LEFT_RET"
+
+TURN_INTO_R1 = "TURN_INTO_R1"
+FORWARD_INTO_R1 = "FORWARD_INTO_R1"
+TURN_FAR_SIDE_R1 = "TURN_FAR_SIDE_R1"
+DRIVE_FAR_SIDE_R1 = "DRIVE_FAR_SIDE_R1"
+TURN_SOUTH_R1 = "TURN_SOUTH_R1"
+
+APPROACH_START_LIGHT = "APPROACH_START_LIGHT"
+BUMP_START_LIGHT = "BUMP_START_LIGHT"
+STOP = "STOP"
+
+state = WAIT_FOR_GREEN
+previous_state = None
+
+current_heading = 0
+ideal_heading = 0 
+desired_position = 0
+target_color = None
+flipped = False
+magnet_timer = 0 
+
+# --- TUNING VARIABLES ---
+START_POSITION = "RIGHT"   
+R1_GAP_POSITION = "LEFT"   # Set to "LEFT" or "RIGHT" based on physical maze layout
+
+R3_DIST_TO_WALL = 0.4      
+R3_DIST_TO_L1 = 0.8        
+R3_DIST_BETW_LIGHTS = 1.1  
+active_approach_state = None 
+
+r3_wall_start_pos = 0.0
+gap_pos_from_corner = 0.0
+center_shift_dir = 1
+
+exit_start_pos = 0.0
+r3_exit_dir = 1
+r2_exit_dir = 1
+
+sensors = {
+    "color": "black",
+    "front": 100.0,
+    "right_prox": 0.0,
+    "left_prox": 0.0, 
+    "heading": 0.0
+}
+
+# --- PID GLOBALS ---
+integral_error = 0.0
+previous_error = 0.0
+last_time = time.time()
+
+# --- NOODLE FIX ---
+noodle = Pin(17, Pin.OUT)
+morse = MorseSender(lambda: noodle.value(1), lambda: noodle.value(0))
+
+def run_morse_code():
+    time.sleep(2)
+    while True:
+        try:
+            morse.send("I HATE ROBOTS")
+            time.sleep(2) 
+        except Exception as e:
+            print(f"MORSE THREAD ERROR: {e}")
+            time.sleep(1)
+
+_thread.start_new_thread(run_morse_code, ())
+
+def handle_heading_rollover(current_h, previous_h):
+    diff = current_h - (previous_h % 360)
+    if diff > 180:
+        diff -= 360
+    elif diff < -180:
+        diff += 360
+    return previous_h + diff
+
+def set_motors(left, right):
+    left_motor.set_effort(left)
+    right_motor.set_effort(right * right_motor_handicap)
+
+# ==========================================
+# --- PROPORTIONAL TURN CONTROLLER       ---
+# ==========================================
+def turn_to_heading(target_precision=0.5):
+    global integral_error 
+    error = ideal_heading - current_heading
+    
+    if error > 180: error -= 360
+    elif error < -180: error += 360
+        
+    if abs(error) <= target_precision:
+        set_motors(0, 0)
+        integral_error = 0.0 
+        return True 
+        
+    Kp_turn = 0.015
+    dynamic_effort = abs(error) * Kp_turn
+    
+    if dynamic_effort < 0.38: 
+        dynamic_effort = 0.38
+    elif dynamic_effort > 0.65: 
+        dynamic_effort = 0.65
+        
+    if error > 0:
+        set_motors(-dynamic_effort, dynamic_effort)
+    else:
+        set_motors(dynamic_effort, -dynamic_effort)
+        
+    return False 
+
+# ==========================================
+# --- FULL PID CONTROLLER ENGINE         ---
+# ==========================================
+def drive_straight_pid(base_effort=nominal_effort):
+    global integral_error, previous_error, last_time
+    
+    current_time = time.time()
+    dt = current_time - last_time
+    if dt <= 0.001: dt = 0.001 
+    
+    error = ideal_heading - current_heading
+    
+    # 360-Degree Heading Wrap-around Fix
+    if error > 180: error -= 360
+    elif error < -180: error += 360
+    
+    if abs(error) > 15:
+        spin_effort = 0.35
+        if error > 0:
+            set_motors(-spin_effort, spin_effort)
+        else:
+            set_motors(spin_effort, -spin_effort)
+        
+        integral_error = 0.0
+        previous_error = error
+        last_time = current_time
+        return
+
+    integral_error += error * dt
+    derivative = (error - previous_error) / dt
+    
+    if integral_error > 50: integral_error = 50
+    elif integral_error < -50: integral_error = -50
+    
+    Kp = 0.006  
+    Ki = 0.001  
+    Kd = 0.001  
+    
+    correction = (Kp * error) + (Ki * integral_error) + (Kd * derivative)
+    
+    if correction > 0.08: correction = 0.08
+    elif correction < -0.08: correction = -0.08
+        
+    set_motors(base_effort - correction, base_effort + correction)
+    
+    previous_error = error
+    last_time = current_time
+
+# ==========================================
+# --- HYBRID WALL FOLLOWER               ---
+# ==========================================
+def follow_wall_proportional(target_dist=120.0, side="right", base_effort=nominal_effort):
+    turn_away_effort = base_effort * 1.3
+    turn_toward_effort = base_effort * 0.8
+
+    if side == "right":
+        if sensors["right_prox"] >= 300:
+            set_motors(turn_toward_effort, turn_away_effort)
+        elif sensors["right_prox"] <= 75:
+            set_motors(turn_away_effort, turn_toward_effort)
+        else:
+            drive_straight_pid(base_effort)
+            
+    else: 
+        if sensors["left_prox"] >= 300:
+            set_motors(turn_away_effort, turn_toward_effort)
+        elif sensors["left_prox"] <= 75:
+            set_motors(turn_toward_effort, turn_away_effort)
+        else:
+            drive_straight_pid(base_effort)
+
+def debug_state():
+    global previous_state
+    if state != previous_state:
+        print(f"STATE CHANGED: {previous_state} ==> {state}")
+        previous_state = state
+
+time.sleep(0.5)
+imu.reset()
+time.sleep(0.5)
+current_heading = imu.get_heading()
+ideal_heading = current_heading 
+last_time = time.time()
+
+while True:
+    sensors["color"] = color.get_color()
+    sensors["front"] = float(rangefinder.distance())
+    sensors["right_prox"] = float(proximity_right.get_proximity())
+    sensors["left_prox"] = float(proximity_left.get_proximity())
+    sensors["heading"] = imu.get_heading()
+    current_heading = handle_heading_rollover(sensors["heading"], current_heading)
+
+    debug_state()
+
+    if state == WAIT_FOR_GREEN:
+        if sensors["color"] == "green":
+            ideal_heading -= 180 
+            state = TURN_180
+
+    elif state == TURN_180:
+        if turn_to_heading():
+            time.sleep(0.15) 
+            state = DRIVE_FORWARD
+
+    elif state == DRIVE_FORWARD:
+        if sensors["front"] < STOP_DIST:
+            set_motors(0, 0)
+            ideal_heading += 90 
+            state = TURN_90
+        else:
+            follow_wall_proportional(target_dist=120.0, side="right")
+
+    elif state == TURN_90:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = DRIVE_FORWARD2
+
+    elif state == DRIVE_FORWARD2:
+        if sensors["right_prox"] <= 15:
+            set_motors(0, 0)
+            desired_position = left_motor.get_position() + 0.75 
+            state = FORWARD_GAP_PUSH
+        else:
+            follow_wall_proportional(target_dist=120.0, side="right")
+
+    elif state == FORWARD_GAP_PUSH:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 90 
+            state = TURN_INTO_ROOM2
+
+    elif state == TURN_INTO_ROOM2:
+        if turn_to_heading():
+            time.sleep(0.15)
+            desired_position = left_motor.get_position() + 2.58
+            state = FORWARD_CENTER_ROOM
+
+    elif state == FORWARD_CENTER_ROOM:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position or sensors["front"] < STOP_DIST:
+            set_motors(0, 0)
+            ideal_heading += 90 
+            state = TURN_90_3
+
+    elif state == TURN_90_3:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = MOVE_TOWARD_LIGHT
+
+    elif state == MOVE_TOWARD_LIGHT:
+        drive_straight_pid(0.35)
+        if sensors["front"] < 8.0: 
+            set_motors(0, 0)
+            time.sleep(0.5)
+            state = READ_COLOR
+
+    elif state == READ_COLOR:
+        if sensors["color"] in ["red", "green", "blue"]:
+            target_color = sensors["color"]
+            if flipped:
+                ideal_heading += 90 
+            else:
+                ideal_heading -= 90 
+            state = TURN_90_TO_EXIT
+        else:
+            desired_position = left_motor.get_position() - 0.5
+            state = BACKUP_BEFORE_180
+
+    elif state == BACKUP_BEFORE_180:
+        drive_straight_pid(-0.4) 
+        if left_motor.get_position() < desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 180 
+            state = TURN_FOR_OTHER_SIDE
+
+    elif state == TURN_FOR_OTHER_SIDE:
+        if turn_to_heading():
+            time.sleep(0.15)
+            flipped = not flipped
+            state = MOVE_TOWARD_LIGHT
+
+    elif state == TURN_90_TO_EXIT:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = DRIVE_TO_R3_WALL
+
+    elif state == DRIVE_TO_R3_WALL:
+        if sensors["front"] < STOP_DIST:
+            set_motors(0, 0)
+            if flipped: 
+                ideal_heading += 90 
+            else:
+                ideal_heading -= 90 
+            state = TURN_CORNER_R2
+        else:
+            drive_straight_pid()
+
+    elif state == TURN_CORNER_R2:
+        if turn_to_heading():
+            time.sleep(0.15)
+            r3_wall_start_pos = left_motor.get_position() 
+            state = FIND_R3_GAP
+
+    elif state == FIND_R3_GAP:
+        if flipped: 
+            if sensors["right_prox"] <= 15 and target_color is not None:
+                set_motors(0, 0)
+                desired_position = left_motor.get_position() + 0.75 
+                state = PUSH_R3_GAP
+            else:
+                follow_wall_proportional(target_dist=120.0, side="right")
+        else: 
+            if sensors["left_prox"] <= 15 and target_color is not None:
+                set_motors(0, 0)
+                desired_position = left_motor.get_position() + 0.75 
+                state = PUSH_R3_GAP
+            else:
+                follow_wall_proportional(target_dist=120.0, side="left")
+
+    elif state == PUSH_R3_GAP:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            if flipped:
+                ideal_heading -= 90 
+            else:
+                ideal_heading += 90 
+            state = TURN_INTO_ROOM3
+
+    elif state == TURN_INTO_ROOM3:
+        if turn_to_heading():
+            time.sleep(0.15)
+            desired_position = left_motor.get_position() + 2.8 
+            state = CLEAR_R3_DOORWAY
+
+    # ==========================================
+    # --- ROOM 3 SQUARING LOGIC              ---
+    # ==========================================
+    
+    elif state == CLEAR_R3_DOORWAY:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 90 
+            state = TURN_RIGHT_TO_PREP
+            
+    elif state == TURN_RIGHT_TO_PREP:
+        if turn_to_heading(0.2): 
+            time.sleep(0.25) 
+            desired_position = left_motor.get_position() + R3_DIST_TO_WALL
+            state = DRIVE_DEEP_RIGHT
+
+    elif state == DRIVE_DEEP_RIGHT:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position or sensors["front"] < 5.0:
+            set_motors(0, 0)
+            ideal_heading -= 180 
+            state = TURN_180_TO_SQUARE
+
+    elif state == TURN_180_TO_SQUARE:
+        if turn_to_heading(0.2): 
+            time.sleep(0.25) 
+            magnet_timer = time.time() 
+            state = SQUARE_UP_WALL
+
+    elif state == SQUARE_UP_WALL:
+        drive_straight_pid(-0.6) 
+        if time.time() - magnet_timer > 4.0: 
+            set_motors(0, 0)
+            ideal_heading = current_heading 
+            desired_position = left_motor.get_position() + R3_DIST_TO_L1
+            state = DRIVE_TO_POS_1
+
+    elif state == DRIVE_TO_POS_1:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 90 
+            state = FACE_LIGHT_1
+
+    elif state == FACE_LIGHT_1:
+        if turn_to_heading(0.2): 
+            time.sleep(0.25) 
+            state = APPROACH_LIGHT_1
+
+    elif state == APPROACH_LIGHT_1:
+        drive_straight_pid(0.35)
+        if sensors["color"] == target_color:
+            magnet_timer = time.time() 
+            active_approach_state = APPROACH_LIGHT_1 
+            state = BUMP_R3_LIGHT
+        elif sensors["front"] < 3.0: 
+            set_motors(0, 0)
+            time.sleep(0.5)
+            if sensors["color"] == target_color:
+                magnet_timer = time.time()
+                active_approach_state = APPROACH_LIGHT_1
+                state = BUMP_R3_LIGHT
+            else:
+                desired_position = left_motor.get_position() - 1.0
+                state = BACKUP_LIGHT_1
+
+    elif state == BACKUP_LIGHT_1:
+        drive_straight_pid(-0.4) 
+        if left_motor.get_position() < desired_position:
+            set_motors(0, 0)
+            ideal_heading += 90 
+            state = TURN_TO_POS_2
+
+    elif state == TURN_TO_POS_2:
+        if turn_to_heading(0.2): 
+            time.sleep(0.25) 
+            desired_position = left_motor.get_position() + R3_DIST_BETW_LIGHTS
+            state = DRIVE_TO_POS_2
+
+    elif state == DRIVE_TO_POS_2:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 90 
+            state = FACE_LIGHT_2
+
+    elif state == FACE_LIGHT_2:
+        if turn_to_heading(0.2): 
+            time.sleep(0.25) 
+            state = APPROACH_LIGHT_2
+
+    elif state == APPROACH_LIGHT_2:
+        drive_straight_pid(0.35)
+        if sensors["color"] == target_color:
+            magnet_timer = time.time() 
+            active_approach_state = APPROACH_LIGHT_2
+            state = BUMP_R3_LIGHT
+        elif sensors["front"] < 3.0: 
+            set_motors(0, 0)
+            time.sleep(0.5)
+            if sensors["color"] == target_color:
+                magnet_timer = time.time()
+                active_approach_state = APPROACH_LIGHT_2
+                state = BUMP_R3_LIGHT
+            else:
+                desired_position = left_motor.get_position() - 1.0
+                state = BACKUP_LIGHT_2
+
+    elif state == BACKUP_LIGHT_2:
+        drive_straight_pid(-0.4) 
+        if left_motor.get_position() < desired_position:
+            set_motors(0, 0)
+            ideal_heading += 90 
+            state = TURN_TO_POS_3
+
+    elif state == TURN_TO_POS_3:
+        if turn_to_heading(0.2): 
+            time.sleep(0.25) 
+            desired_position = left_motor.get_position() + R3_DIST_BETW_LIGHTS 
+            state = DRIVE_TO_POS_3
+
+    elif state == DRIVE_TO_POS_3:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 90 
+            state = FACE_LIGHT_3
+
+    elif state == FACE_LIGHT_3:
+        if turn_to_heading(0.2): 
+            time.sleep(0.25) 
+            state = APPROACH_LIGHT_3
+
+    elif state == APPROACH_LIGHT_3:
+        drive_straight_pid(0.35)
+        if sensors["color"] == target_color or sensors["front"] < 3.0: 
+            magnet_timer = time.time() 
+            active_approach_state = APPROACH_LIGHT_3
+            state = BUMP_R3_LIGHT
+
+    # --- BUMP EXECUTION ---
+    elif state == BUMP_R3_LIGHT:
+        drive_straight_pid(0.45) 
+        if time.time() - magnet_timer > 1.25: 
+            set_motors(0, 0)
+            magnet_timer = time.time() 
+            state = WAIT_FOR_WHITE
+
+    elif state == WAIT_FOR_WHITE:
+        set_motors(0, 0)
+        if sensors["color"] == "white":
+            desired_position = left_motor.get_position() - 1.0 
+            state = REVERSE_OUT_R3
+        elif time.time() - magnet_timer >= 3: 
+            desired_position = left_motor.get_position() - 0.5
+            state = BACKUP_RETRY_LIGHT
+
+    elif state == BACKUP_RETRY_LIGHT:
+        drive_straight_pid(-0.4) 
+        if left_motor.get_position() < desired_position:
+            set_motors(0, 0)
+            state = active_approach_state 
+
+    # ==========================================
+    # --- R3 DYNAMIC EXIT LOGIC ----------------
+    # ==========================================
+
+    elif state == REVERSE_OUT_R3:
+        drive_straight_pid(-nominal_effort) 
+        if left_motor.get_position() < desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 180 
+            state = TURN_180_RET
+
+    elif state == TURN_180_RET:
+        if turn_to_heading():
+            time.sleep(0.15)
+            exit_start_pos = left_motor.get_position()
+            state = DRIVE_OUT_R3 
+
+    elif state == DRIVE_OUT_R3:
+        if sensors["front"] < STOP_DIST:
+            set_motors(0, 0)
+            magnet_timer = time.time()
+            state = SQUARE_UP_SOUTH_WALL_R3 
+        else:
+            drive_straight_pid()
+            
+    elif state == SQUARE_UP_SOUTH_WALL_R3:
+        drive_straight_pid(0.5) 
+        if time.time() - magnet_timer > 1.5: 
+            set_motors(0, 0)
+            ideal_heading = current_heading 
+            
+            if (left_motor.get_position() - exit_start_pos) < 3.5:
+                if active_approach_state == APPROACH_LIGHT_1: 
+                    ideal_heading -= 90 
+                    r3_exit_dir = -1
+                else: 
+                    ideal_heading += 90 
+                    r3_exit_dir = 1
+                state = TURN_TO_R3_GAP
+            else:
+                if not flipped:
+                    ideal_heading += 90 
+                    r2_exit_dir = 1
+                else:
+                    ideal_heading -= 90 
+                    r2_exit_dir = -1
+                state = TURN_AWAY_FROM_R2_LIGHT
+
+    elif state == TURN_TO_R3_GAP:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = DRIVE_TO_R3_GAP_EDGE
+
+    elif state == DRIVE_TO_R3_GAP_EDGE:
+        if r3_exit_dir == 1:
+            if sensors["right_prox"] <= 15:
+                set_motors(0, 0)
+                desired_position = left_motor.get_position() + 0.75
+                state = PUSH_R3_GAP_OUT
+            else:
+                follow_wall_proportional(target_dist=120.0, side="right")
+        else:
+            if sensors["left_prox"] <= 15:
+                set_motors(0, 0)
+                desired_position = left_motor.get_position() + 0.75
+                state = PUSH_R3_GAP_OUT
+            else:
+                follow_wall_proportional(target_dist=120.0, side="left")
+
+    elif state == PUSH_R3_GAP_OUT:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            if r3_exit_dir == 1:
+                ideal_heading -= 90 
+            else:
+                ideal_heading += 90 
+            state = TURN_INTO_R2_FROM_R3
+
+    elif state == TURN_INTO_R2_FROM_R3:
+        if turn_to_heading():
+            time.sleep(0.15)
+            desired_position = left_motor.get_position() + 1.0
+            state = FORWARD_CENTER_R2_RET
+
+    # ==========================================
+    # --- R2 RETURN LOGIC ----------------------
+    # ==========================================
+
+    elif state == FORWARD_CENTER_R2_RET:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            if not flipped:
+                ideal_heading += 90 
+                r2_exit_dir = 1
+            else:
+                ideal_heading -= 90 
+                r2_exit_dir = -1
+            state = TURN_AWAY_FROM_R2_LIGHT
+
+    elif state == TURN_AWAY_FROM_R2_LIGHT:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = DRIVE_FAR_SIDE_R2_RET
+
+    elif state == DRIVE_FAR_SIDE_R2_RET:
+        drive_straight_pid()
+        if sensors["front"] < STOP_DIST:
+            set_motors(0, 0)
+            if r2_exit_dir == 1: 
+                ideal_heading -= 90
+            else: 
+                ideal_heading += 90
+            state = TURN_SOUTH_R2_RET
+
+    elif state == TURN_SOUTH_R2_RET:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = DRIVE_TO_R1_DIVIDER_RET
+
+    elif state == DRIVE_TO_R1_DIVIDER_RET:
+        drive_straight_pid()
+        if sensors["front"] < STOP_DIST:
+            set_motors(0, 0)
+            if r2_exit_dir == 1: 
+                ideal_heading -= 90
+            else: 
+                ideal_heading += 90
+            state = TURN_ALONG_R1_DIVIDER_RET
+
+    elif state == TURN_ALONG_R1_DIVIDER_RET:
+        if turn_to_heading():
+            time.sleep(0.15)
+            if r2_exit_dir == 1: 
+                state = FIND_R1_GAP_LEFT_RET 
+            else:
+                state = FIND_R1_GAP_RET 
+
+    # ==========================================
+    # --- UNIFIED R1 RETURN PATH             ---
+    # ==========================================
+    elif state == FIND_R1_GAP_RET:
+        if sensors["right_prox"] <= 15:
+            set_motors(0, 0)
+            desired_position = left_motor.get_position() + 0.75 
+            state = PUSH_R1_GAP_RET
+        else:
+            follow_wall_proportional(target_dist=120.0, side="right")
+
+    elif state == PUSH_R1_GAP_RET:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            ideal_heading -= 90 
+            state = TURN_INTO_R1
+
+    elif state == FIND_R1_GAP_LEFT_RET:
+        if sensors["left_prox"] <= 15:
+            set_motors(0, 0)
+            desired_position = left_motor.get_position() + 0.75 
+            state = PUSH_R1_GAP_LEFT_RET
+        else:
+            follow_wall_proportional(target_dist=120.0, side="left")
+
+    elif state == PUSH_R1_GAP_LEFT_RET:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            ideal_heading += 90 
+            state = TURN_INTO_R1
+
+    elif state == TURN_INTO_R1:
+        if turn_to_heading():
+            time.sleep(0.15)
+            desired_position = left_motor.get_position() + 1.0 
+            state = FORWARD_INTO_R1
+
+    elif state == FORWARD_INTO_R1:
+        drive_straight_pid()
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            # CROSSOVER CHECK
+            if R1_GAP_POSITION == START_POSITION: 
+                state = APPROACH_START_LIGHT
+            else: 
+                if START_POSITION == "RIGHT": 
+                    ideal_heading += 90 
+                else: 
+                    ideal_heading -= 90 
+                state = TURN_FAR_SIDE_R1
+
+    elif state == TURN_FAR_SIDE_R1:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = DRIVE_FAR_SIDE_R1
+
+    elif state == DRIVE_FAR_SIDE_R1:
+        if sensors["front"] < STOP_DIST:
+            set_motors(0, 0)
+            if START_POSITION == "RIGHT": 
+                ideal_heading -= 90 
+            else: 
+                ideal_heading += 90 
+            state = TURN_SOUTH_R1
+        else:
+            drive_straight_pid()
+
+    elif state == TURN_SOUTH_R1:
+        if turn_to_heading():
+            time.sleep(0.15)
+            state = APPROACH_START_LIGHT
+
+    # ==========================================
+    # --- FINAL BUMP EXECUTION               ---
+    # ==========================================
+    elif state == APPROACH_START_LIGHT:
+        drive_straight_pid()
+        if sensors["front"] < LIGHT_STOP_DIST:
+            set_motors(0, 0)
+            desired_position = left_motor.get_position() + 0.6
+            state = BUMP_START_LIGHT
+
+    elif state == BUMP_START_LIGHT:
+        drive_straight_pid(0.25)
+        if left_motor.get_position() > desired_position:
+            set_motors(0, 0)
+            state = STOP
+
+    elif state == STOP:
+        set_motors(0, 0)
+
+    time.sleep(0.02)
+
